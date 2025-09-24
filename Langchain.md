@@ -10,6 +10,85 @@ It is an open source framework that helps in building LLM based applications. It
 5. Supports all major GenAI use cases.
 
 
+## Problems before langchain
+
+1. Prompt Engineering Was Manual
+
+    - Developers had to hardcode prompts as plain strings in their code.
+
+    - Hard to reuse or structure prompts for different tasks.
+
+    - No standard way to inject variables or templates — you’d just concatenate strings.
+    👉 Result: brittle prompts, hard to maintain.
+
+2. No Standard Abstraction Layer for Models
+
+    - Each provider (OpenAI, Hugging Face, Anthropic, Cohere, etc.) had its own API style.
+
+    - If you wanted to switch from GPT-3 to another model, you had to rewrite large parts of code.
+    👉 No plug-and-play model switching.
+
+3. Lack of Memory / Context Handling
+
+    - LLMs are stateless. They don’t remember past interactions unless you manually feed the history every time.
+
+    - Developers had to manually build conversation history and re-send it, leading to:
+
+        - Higher token costs 💰
+
+        - Complexity in managing long conversations
+    👉 No native conversation memory.
+
+4. Orchestration of Multiple Steps Was Hard
+
+    - Many real-world tasks need multi-step reasoning:
+
+        - Example: search → summarize → format → return answer.
+
+    - Without LangChain, you had to hardcode pipelines of prompts + custom logic.
+
+    - No standard framework for chains or agents to decide next actions.
+
+5. Tool Integration Was Messy
+
+- LLMs often need tools like:
+
+    - Search APIs
+
+    - Calculators
+
+    - Database queries
+
+- Before LangChain, developers had to manually write:
+
+    - Prompt instructions telling the model how to call the tool.
+
+    - Code to intercept responses and run the tool.
+    👉 Super ad hoc and fragile.
+
+6. No Vector Store Integration (for RAG)
+
+- Retrieval-Augmented Generation (RAG) needs vector databases (Pinecone, FAISS, Weaviate).
+
+- Before LangChain:
+
+    - Developers had to separately manage embeddings, store them, retrieve top-k matches.
+
+    - Then manually inject results into prompts.
+👉 No unified interface to connect LLMs with knowledge bases.
+
+7. Deployment Was Not Standardized
+
+    - Everyone wrote custom glue code to wrap models, prompts, chains, memory, and tools.
+
+    - Hard to test, debug, or share.
+
+👉 Lack of ecosystem → slowed adoption.
+
+
+
+
+
 ### Components
 
 1. Models
@@ -18,7 +97,7 @@ It is an open source framework that helps in building LLM based applications. It
 
     * Provide a standard interface for calling models regardless of the provider.
 
-    * Two main types:
+    * main types:
 
         * LLMs → take text input, return text output.
 

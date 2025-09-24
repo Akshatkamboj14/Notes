@@ -1978,3 +1978,460 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         - conntrack ensures response flows back to original client session.
 
 
+
+# Secret
+
+How Secrets are Stored in etcd
+
+- By default, Kubernetes stores Secrets in etcd (the cluster database).
+
+- Values are Base64-encoded, NOT encrypted.
+
+- Base64 encoding is just a reversible text transformation (not secure).
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysecret
+type: Opaque
+data:
+  username: YWRtaW4=   # "admin" in Base64
+  password: cGFzc3dvcmQ= # "password"
+```
+
+- In etcd, it is stored as:
+```
+{
+  "username": "YWRtaW4=",
+  "password": "cGFzc3dvcmQ="
+}
+```
+
+- Anyone with access to etcd or API can decode and see admin:password.
+
+✅ To make this secure, you enable encryption at rest for Secrets in etcd.
+
+## The Flow When You Apply a Secret
+Step 1: Apply Manifest
+```
+kubectl apply -f secret.yaml
+```
+
+- kubectl sends the manifest to the Kubernetes API server.
+
+Step 2: API Server Validation
+
+- API server validates that:
+
+    - ``kind: Secret`` is correct.
+
+    - Keys in ``.data`` are valid Base64 strings.
+
+    - ``.stringData`` (if provided) is converted into .data with Base64 automatically.
+
+Step 3: Storage in etcd
+
+- API server writes the Secret object into etcd.
+
+- Values under .data are Base64-encoded strings.
+
+Step 4: Pod Requests the Secret
+
+- A Pod spec might reference the Secret:
+```
+spec:
+  containers:
+  - name: app
+    image: myapp
+    envFrom:
+    - secretRef:
+        name: mysecret
+```
+
+- When the scheduler assigns the Pod to a node:
+
+    - The kubelet on that node requests the Secret from the API server.
+
+    - API server authenticates and authorizes the kubelet (RBAC).
+
+Step 5: kubelet injects the Secret
+
+- The kubelet mounts the Secret into the Pod as:
+
+    - Environment variables (env / envFrom).
+
+    - Volume mounts (volumes with secret).
+
+Example (mounted as file):
+```
+/etc/secrets/username   → contains "admin"
+/etc/secrets/password   → contains "password"
+```
+
+- The Secret is placed in-memory (tmpfs) inside the container’s filesystem, not on disk.
+
+Step 6: Pod Access
+
+- The containerized app reads the Secret as an env var or file.
+
+- The Secret is never baked into the image → dynamic injection.
+
+## Security Considerations
+
+- Default: Stored in etcd as Base64 (not encrypted).
+
+- Best practice:
+
+    - Enable encryption at rest for etcd (AES).
+
+    - Restrict access to get secret via RBAC.
+
+    - Use external secret managers (e.g., HashiCorp Vault, AWS Secrets Manager, SOPS + SealedSecrets).
+
+- Secrets can still leak via:
+
+    - kubectl describe pod (if exposed in env vars).
+
+    - Pod logs (if app prints secrets).
+
+
+
+# Configmaps
+
+How ConfigMaps are Stored in etcd
+
+- A ConfigMap stores plain text key-value pairs in etcd.
+
+- Unlike Secrets, values are not Base64-encoded — they’re stored as-is.
+
+- Example:
+
+```
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myconfig
+data:
+  app.properties: |
+    APP_ENV=dev
+    DB_HOST=db.example.com
+    DB_PORT=5432
+```
+
+- In etcd, stored as JSON like:
+```
+{
+  "app.properties": "APP_ENV=dev\nDB_HOST=db.example.com\nDB_PORT=5432\n"
+}
+```
+
+👉 Meaning: ConfigMaps are even less secure than Secrets (just plain text).
+
+## The Flow When You Apply a ConfigMap
+
+Step 1: Apply Manifest
+```
+kubectl apply -f configmap.yaml
+```
+
+- kubectl sends the ConfigMap manifest to the API server.
+
+Step 2: API Server Validation
+
+- API server checks for:
+
+    - Correct format (data or binaryData fields).
+
+    - No size violations (ConfigMaps can be max ~1MB).
+
+Step 3: Storage in etcd
+
+- API server writes the ConfigMap into etcd.
+
+- Stored in plain text (JSON string).
+
+Step 4: Pod References ConfigMap
+
+Example pod spec:
+```
+spec:
+  containers:
+  - name: app
+    image: myapp
+    envFrom:
+    - configMapRef:
+        name: myconfig
+    volumeMounts:
+    - name: config-volume
+      mountPath: /etc/config
+  volumes:
+  - name: config-volume
+    configMap:
+      name: myconfig
+```
+
+- Kubelet requests the ConfigMap from API server.
+
+- API server authorizes kubelet via RBAC.
+
+Step 5: kubelet injects the ConfigMap
+
+Two ways ConfigMap data enters the pod:
+
+1. Environment variables (envFrom, env).
+
+2. Mounted as files in a volume (on tmpfs inside container).
+
+Example mounted file:
+```
+/etc/config/app.properties → contains:
+APP_ENV=dev
+DB_HOST=db.example.com
+DB_PORT=5432
+```
+Step 6: Pod Access
+
+- The app reads config via environment variables or by reading the mounted file.
+
+- Changes in the ConfigMap don’t automatically restart pods.
+
+    - If mounted as a volume: kubelet updates the file contents live (within seconds).
+
+    - If set as env vars: pod restart needed.
+
+
+
+# Metric Server
+
+- Deployment in kube-system namespace
+
+Metrics Server is a lightweight, in-cluster aggregator that collects current CPU and memory usage from kubelets and exposes them through the Kubernetes Aggregated API as ``metrics.k8s.io`` (e.g. ``/apis/metrics.k8s.io/v1beta1/pods``).
+
+- Purpose: provide live resource usage for autoscaling (HorizontalPodAutoscaler) and kubectl top.
+
+ - Not a time-series / historical store — only recent/current metrics.
+
+- Not a replacement for Prometheus for long-term metrics, alerting, or dashboards.
+
+
+2. High-level architecture & data flow
+
+    ```
+    [kubelets on each node]  <--scrape--  [metrics-server pod(s)]  <--serve--  [kube-apiserver Aggregated API]  <--clients--  [HPA, kubectl top, other consumers]
+    ```
+
+Detailed steps:
+
+1. Discovery: metrics-server watches the API server for Node objects (it discovers nodes via the Kubernetes API).
+
+2. Scrape: for each node it selects an address (InternalIP/ExternalIP/Hostname per config) and calls the kubelet Summary API (HTTPS, typically https://<node-ip>:10250/stats/summary) to fetch pod/container CPU & memory usage.
+
+3. Aggregate / translate: it converts kubelet/cadvisor readings into the Kubernetes resource metric format (CPU in millicores, memory in bytes), aggregates per-pod (sum of containers) and per-node, and serves them via the metrics.k8s.io API.
+
+4. Serve via APIService: metrics-server registers an APIService (e.g. v1beta1.metrics.k8s.io) with the API server so clients can kubectl get --raw /apis/metrics.k8s.io/... or the HPA controller can query it.
+
+
+## What it scrapes (and from where)
+
+- Source: kubelet Summary API (/stats/summary) which itself gathers data from cAdvisor or kubelet internals.
+
+- What: per-node and per-pod CPU usage and memory RSS/working set (depending on kubelet/cAdvisor).
+
+- Units:
+
+    - CPU → represented to users in millicores (1000m = 1 CPU core). Kubelet/cAdvisor may report in nanocores or raw units; metrics-server normalizes to millicores.
+
+    - Memory → reported in bytes (converted to Mi/Gi in CLI output).
+
+- Aggregation:
+
+    - Pod metrics = sum of its containers’ usages.
+
+    - Node metrics = sum of pod containers + node system usage (if available).
+
+## How clients use metrics-server
+
+- ``kubectl top nodes`` / ``kubectl top pods`` → queries ```metrics.k8s.io ```API served by metrics-server.
+
+- HPA (resource metrics) → HPA controller queries ``metrics.k8s.io`` for Pod/Node resource usage to compute desired replicas.
+
+- Admission/other controllers → might query ``metrics.k8s.io`` as needed.
+
+
+# HPA
+
+1) What is HPA?
+
+- Horizontal Pod Autoscaler (HPA) is a controller in Kubernetes that automatically adjusts the number of pods in a workload (Deployment, ReplicaSet, StatefulSet, etc.) based on observed metrics.
+
+- Runs inside the kube-controller-manager.
+
+- Scaling direction:
+
+    - Scale Out (add replicas) → when demand/usage is high.
+
+    - Scale In (remove replicas) → when demand/usage is low.
+
+👉 It’s about horizontal scaling (replicas), not vertical (resources per pod).
+
+
+2) Architecture & Components
+
+```
+[Metrics Server / Adapter] --> [K8s API Server] --> [HPA Controller (in controller-manager)] --> [Scale subresource of Deployment/ReplicaSet/etc.] --> [Scheduler creates/destroys pods]
+```
+
+1. Metrics Source
+
+- Default: Metrics Server (for CPU/memory usage).
+
+- Adapters: Prometheus Adapter, Custom Metrics API, External Metrics API.
+
+2. HPA Controller
+
+- Periodically (every 15s by default) fetches metrics.
+
+- Computes desired replica count.
+
+- Updates target resource’s Scale subresource (``spec.replicas``).
+
+3. Scale Subresource
+
+- Targeted controllers (e.g., Deployment) listen to Scale updates and adjust pods accordingly.
+
+
+
+
+# Prometheus
+
+1) What is Prometheus?
+
+- Prometheus is an open-source monitoring and alerting system (part of CNCF).
+
+- Designed for time-series data (metrics changing over time: CPU usage, HTTP requests, errors).
+
+- Pull-based: scrapes targets over HTTP (/metrics endpoint).
+
+- Comes with PromQL (query language) and built-in alerting.
+
+- Commonly paired with Grafana for dashboards.
+
+👉 It’s like a database for metrics + a system to collect them automatically.
+
+
+### Core Architecture
+
+```
+         [Applications/Exporters]
+                (metrics endpoints)
+                        |
+                        v
+                  [Prometheus Server]
+        +------------------+------------------+
+        | Scrape targets   | Time-series DB   |
+        | (HTTP pull)      | (TSDB on disk)   |
+        +------------------+------------------+
+                        |
+             +----------+----------+
+             |                     |
+      [PromQL / API]         [Alertmanager]
+             |                     |
+        [Grafana]              [Notifications]
+```
+
+
+Components:
+
+1. Prometheus Server
+
+    - Scrape targets (collect metrics).
+
+    - Stores data in TSDB (time-series database) on local disk.
+
+    - Exposes APIs for queries (PromQL).
+
+2. Exporters
+
+    - Small agents that expose metrics in Prometheus format (/metrics).
+
+    - Example: node_exporter (system metrics), kube-state-metrics, cAdvisor.
+
+3. Service Discovery
+
+    - Auto-discovers scrape targets (e.g., Kubernetes, Consul, EC2).
+
+4. PromQL
+
+    - Query language for metrics analysis.
+
+5. Alertmanager
+
+    - Handles alerts from Prometheus (routes → email, Slack, PagerDuty).
+
+6. Grafana
+
+    - Visualization layer that queries Prometheus via API.
+
+
+
+### How Prometheus Works (Flow)
+
+- Step 1: Instrumentation
+
+    - Applications expose metrics via /metrics HTTP endpoint (usually text format).
+
+    - Example app metric:
+    ```
+    http_requests_total{method="GET", status="200"} 12345
+    ```
+
+- Step 2: Scraping
+
+    - Prometheus server pulls metrics from targets on a schedule (default: every 15s).
+
+    - Targets can be static (IP/URL) or discovered dynamically (e.g., Kubernetes Service discovery).
+
+- Step 3: Storage
+
+    - Metrics are stored in a time-series database (TSDB).
+
+        - Each metric = {metric_name}{label1=value1,...} value timestamp.
+
+        - Example:
+        ```
+        http_requests_total{method="GET",status="200"} 42 1675230000
+        ```
+
+Step 4: Querying
+
+- Use PromQL (Prometheus Query Language) to extract, aggregate, and analyze data.
+
+    - Example:
+    ```
+    rate(http_requests_total[5m])
+    ```
+
+    → requests per second averaged over last 5 minutes.
+
+Step 5: Alerting
+
+- Define alert rules in Prometheus (alerts.yml).
+
+- Example:
+```
+- alert: HighCPU
+  expr: node_cpu_seconds_total > 0.9
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    description: "CPU usage high"
+```
+
+- Alerts are sent to Alertmanager, which handles deduplication, silencing, routing.
+
+Step 6: Visualization
+
+Grafana queries Prometheus API.
+
+Dashboards display metrics in graphs, heatmaps, etc.

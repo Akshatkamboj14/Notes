@@ -333,7 +333,7 @@ docker run -d -p 8080:8080 myapp:1.0
 
 # Docker file
 ```
-Dockerimage -> image -> conatiner
+Dockerfile -> image -> container
 ```
 
 - A Dockerfile is a text file that contains a set of instructions to build a Docker image.
