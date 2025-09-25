@@ -48,7 +48,19 @@ since workflow can take days to excuete and langchain doesn't provide fault tole
 by this means if your system breaks somewheer it should resume for there itself.
 
 
+5. humans in the loop
+
+langgraoh has a feature where it can wait for humans for days.
 
 
 
+6. sub graphs can be there - fetaure
 
+
+![alt text](image.png)
+
+
+![alt text](image-2.png)
+
+
+![alt text](image-3.png)
